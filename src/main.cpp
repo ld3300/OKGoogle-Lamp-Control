@@ -27,16 +27,19 @@
 #include "Adafruit_MQTT_Client.h"
 #include "private.h"
 
+#define PUSHUPDATETIME 600000  // 10 minutes
+
 #define LAMPPIN 0                         // Pin controlling lamp output
 #define SWITCHPIN 12                      // Pin that reads change of built-in lamp switch (soldered to chip on esp-01)
 #define LAMPON "lampon"
 #define LAMPOFF "lampoff"
 const IPAddress apIP(192, 168, 1, 1);     // IP when in AP mode (when wifi connect fails)
 const char *apSSID = "ESP8266_SETUP";     // AP name to connect to to configure wifi
-boolean settingMode;                      // Store setting of wifi connect
+bool settingMode;                      // Store setting of wifi connect
 String ssidList;                          // Scanned SSIDs in AP mode
-boolean switchState;                      // Is switch on or off (for managing toggles)
-boolean lampState = false;                    // Is lamp currently on or off
+bool lampState = false;                    // Is lamp currently on or off
+bool lastLampState = false;
+unsigned long lastUpdateTime = 0;
 
 DNSServer dnsServer;
 ESP8266WebServer webServer(80);
@@ -48,7 +51,7 @@ WiFiClient client;
 
 Adafruit_MQTT_Client mqtt(&client, MQTT_SERV, MQTT_PORT, MQTT_NAME, MQTT_PASS);   // These values are stored in private.h file
 Adafruit_MQTT_Subscribe bedroom = Adafruit_MQTT_Subscribe(&mqtt, MQTT_NAME "/feeds/bedroom", MQTT_QOS_1);
-Adafruit_MQTT_Publish bedroomPush = Adafruit_MQTT_Publish(&mqtt, MQTT_NAME "/feeds/bedroom", MQTT_QOS_1);
+Adafruit_MQTT_Publish bedroomPush = Adafruit_MQTT_Publish(&mqtt, MQTT_NAME "/feeds/bedroomStatus", MQTT_QOS_1);
 
 void MQTT_connect(){
   int8_t ret;
@@ -88,11 +91,17 @@ void lampStatePublish(bool xlampstate){       // We are going to publish our sta
   }
 }
 
+void handleSwitch() {
+  lampState = !lampState;                     // update lamp state
+  digitalWrite(LAMPPIN, lampState);          // Invert state of lamp
+}
+
 void setup(){
   pinMode(LAMPPIN, OUTPUT);
   pinMode(SWITCHPIN, INPUT);
   Serial.begin(115200);
-  switchState = digitalRead(SWITCHPIN);   // Get initial state of the lamp switch
+  // switchState = digitalRead(SWITCHPIN);   // Get initial state of the lamp switch
+  attachInterrupt(SWITCHPIN, handleSwitch, CHANGE);
 
   //WiFiManager
   //Local intialization. Once its business is done, there is no need to keep it around
@@ -141,6 +150,8 @@ void setup(){
   ArduinoOTA.begin();
 
   mqtt.subscribe(&bedroom);         // Subscribe to the bedroom feed on adafruit io
+  MQTT_connect();
+  lampStatePublish(lampState);
 }
 
 void loop(){
@@ -148,22 +159,25 @@ void loop(){
   //Connect/Reconnect to MQTT
   MQTT_connect();
 
+    // periodically push state to mqtt. either by state change, timeout, or millis() rollover
+  if(lastLampState != lampState || millis() >= PUSHUPDATETIME + lastUpdateTime || millis() < lastUpdateTime){
+    lampStatePublish(lampState);                // Push state change back to MQTT server
+    lastLampState = lampState;
+    lastUpdateTime = millis();
+  }
+
   // Read from our subscription queue until we run out, or
   // wait up to 5 seconds for subscription to update
   Adafruit_MQTT_Subscribe *subscription;
-  while ((subscription = mqtt.readSubscription(5000))){
+  while ((subscription = mqtt.readSubscription(2000))){
     //If we're in here, a subscription updated...
     if (subscription == &bedroom){
       char buffer[50];
       sprintf(buffer, "%s", (char *)bedroom.lastread);
-
       //Print the new value to the serial monitor
       Serial.print("Bedroom: ");
       Serial.println(buffer);
-      //If the new value is  "ON", turn the light on.
-      //Otherwise, turn it off.
       if (strstr(buffer, LAMPON) != NULL){
-        //active low logic
         digitalWrite(LAMPPIN, HIGH);
         Serial.println("On executed");
         lampState = true;
@@ -176,15 +190,7 @@ void loop(){
     }
   }
 
-  bool switchRead = digitalRead(SWITCHPIN);     // read pin for lamp switch
-  if(switchState != switchRead){                // If switch state changed
-    // digitalWrite(LAMPPIN, !lampState);          // Invert state of lamp
-    lampState = !lampState;                     // update lamp state
-    switchState = switchRead;                   // update switch state
-    lampStatePublish(lampState);                // Push state change back to MQTT server
-  }
-
-  // ping the server to keep the mqtt connection alive
+  // ping the server to keep the  mqtt connection alive
   // if (!mqtt.ping()){             // Commented because it seemed to be causing packet issues
   //   mqtt.disconnect();
   // }
