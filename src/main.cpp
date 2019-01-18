@@ -172,23 +172,23 @@ void loop(){
   MQTT_connect();
 
   // periodically push state to mqtt. either by state change, timeout, or millis() rollover
-  if(lastLampState != lampState || millis() >= PUSHUPDATETIME + lastUpdateTime || millis() < lastUpdateTime){
+  if(lastLampState != lampState || ((millis() >= PUSHUPDATETIME + lastUpdateTime) || millis() < lastUpdateTime)){
     static unsigned long mqtt_last_time = millis();
-    if(mqtt_publish_overflow  || millis() < mqtt_last_time){                  // Stop publishing if we have hit service overflow
+    if(mqtt_publish_overflow){                  // Stop publishing if we have hit service overflow
       mqtt_last_time = millis();
     }
-    else if (millis() - mqtt_last_time > AIOTHROTTLETIMEOUT){
-      mqtt_publish_overflow = false;
+    else if (!mqtt_publish_overflow || (millis() - mqtt_last_time > AIOTHROTTLETIMEOUT)){
       lampStatePublish(lampState);                // Push state change back to MQTT server
       lastLampState = lampState;
       lastUpdateTime = millis();
     }
+    mqtt_publish_overflow = false;
   }
 
   // Read from our subscription queue until we run out, or
   // wait up to 5 seconds for subscription to update
   Adafruit_MQTT_Subscribe *subscription;
-  while ((subscription = mqtt.readSubscription(2000))){
+  while ((subscription = mqtt.readSubscription(500))){
     //If we're in here, a subscription updated...
     if (subscription == &bedroom){
       char buffer[50];
