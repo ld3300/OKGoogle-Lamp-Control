@@ -27,14 +27,16 @@
 #include "Adafruit_MQTT_Client.h"
 #include "private.h"
 
-#define PUSHUPDATETIME 600000  // 10 minutes
+#define PUSHUPDATETIME 3600000  // 60 minutes
 
 #define LAMPPIN 0                         // Pin controlling lamp output
 #define SWITCHPIN 12                      // Pin that reads change of built-in lamp switch (soldered to chip on esp-01)
 #define LAMPON "lampon"
 #define LAMPOFF "lampoff"
+#define AIOTHROTTLETIMEOUT 60000    // time to wait before trying to publish again if we hit throttle status
+
 const IPAddress apIP(192, 168, 1, 1);     // IP when in AP mode (when wifi connect fails)
-const char *apSSID = "ESP8266_SETUP";     // AP name to connect to to configure wifi
+const char *apSSID = "Bedroom_Lamp_SETUP";     // AP name to connect to to configure wifi
 bool settingMode;                      // Store setting of wifi connect
 String ssidList;                          // Scanned SSIDs in AP mode
 bool lampState = false;                    // Is lamp currently on or off
@@ -51,7 +53,9 @@ WiFiClient client;
 
 Adafruit_MQTT_Client mqtt(&client, MQTT_SERV, MQTT_PORT, MQTT_NAME, MQTT_PASS);   // These values are stored in private.h file
 Adafruit_MQTT_Subscribe bedroom = Adafruit_MQTT_Subscribe(&mqtt, MQTT_NAME "/feeds/bedroom", MQTT_QOS_1);
+Adafruit_MQTT_Publish bedroomPub = Adafruit_MQTT_Publish(&mqtt, MQTT_NAME "/feeds/bedroom", MQTT_QOS_1);
 Adafruit_MQTT_Publish bedroomPush = Adafruit_MQTT_Publish(&mqtt, MQTT_NAME "/feeds/bedroomStatus", MQTT_QOS_1);
+Adafruit_MQTT_Subscribe throttle = Adafruit_MQTT_Subscribe(&mqtt, MQTT_NAME "/throttle", MQTT_QOS_1);  // check if data limit reached
 
 void MQTT_connect(){
   int8_t ret;
@@ -91,9 +95,14 @@ void lampStatePublish(bool xlampstate){       // We are going to publish our sta
   }
 }
 
-void handleSwitch() {
-  lampState = !lampState;                     // update lamp state
-  digitalWrite(LAMPPIN, lampState);          // Invert state of lamp
+void handleSwitchISR() {
+  static unsigned long last_interrupt_time = 0;
+  unsigned long interrupt_time = millis();
+  if(interrupt_time - last_interrupt_time > 200 || interrupt_time < last_interrupt_time){
+    lampState = !lampState;                     // update lamp state
+    digitalWrite(LAMPPIN, lampState);          // Invert state of lamp
+    last_interrupt_time = interrupt_time;
+  }
 }
 
 void setup(){
@@ -101,8 +110,9 @@ void setup(){
   pinMode(SWITCHPIN, INPUT);
   Serial.begin(115200);
   // switchState = digitalRead(SWITCHPIN);   // Get initial state of the lamp switch
-  attachInterrupt(SWITCHPIN, handleSwitch, CHANGE);
-
+  attachInterrupt(SWITCHPIN, handleSwitchISR, CHANGE);
+  lampState = true;
+  handleSwitchISR();
   //WiFiManager
   //Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wifiManager;
@@ -151,19 +161,28 @@ void setup(){
 
   mqtt.subscribe(&bedroom);         // Subscribe to the bedroom feed on adafruit io
   MQTT_connect();
-  lampStatePublish(lampState);
+  bedroomPub.publish(LAMPOFF);      // write an initial state to keep things intact until ability to get last message is available
+  lampStatePublish(false);
 }
 
 void loop(){
+  static bool mqtt_publish_overflow = false;
   ArduinoOTA.handle();          // Check for OTA
   //Connect/Reconnect to MQTT
   MQTT_connect();
 
-    // periodically push state to mqtt. either by state change, timeout, or millis() rollover
+  // periodically push state to mqtt. either by state change, timeout, or millis() rollover
   if(lastLampState != lampState || millis() >= PUSHUPDATETIME + lastUpdateTime || millis() < lastUpdateTime){
-    lampStatePublish(lampState);                // Push state change back to MQTT server
-    lastLampState = lampState;
-    lastUpdateTime = millis();
+    static unsigned long mqtt_last_time = millis();
+    if(mqtt_publish_overflow  || millis() < mqtt_last_time){                  // Stop publishing if we have hit service overflow
+      mqtt_last_time = millis();
+    }
+    else if (millis() - mqtt_last_time > AIOTHROTTLETIMEOUT){
+      mqtt_publish_overflow = false;
+      lampStatePublish(lampState);                // Push state change back to MQTT server
+      lastLampState = lampState;
+      lastUpdateTime = millis();
+    }
   }
 
   // Read from our subscription queue until we run out, or
@@ -187,6 +206,9 @@ void loop(){
         Serial.println("Off executed");
         lampState = false;
       }
+    }
+    else if (subscription == &throttle){
+      mqtt_publish_overflow = true;
     }
   }
 
