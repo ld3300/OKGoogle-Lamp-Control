@@ -33,6 +33,7 @@
 #define SWITCHPIN 12                      // Pin that reads change of built-in lamp switch (soldered to chip on esp-01)
 #define LAMPON "lampon"
 #define LAMPOFF "lampoff"
+#define STATUSREQUEST "lampstatus"
 #define AIOTHROTTLETIMEOUT 60000    // time to wait before trying to publish again if we hit throttle status
 
 const IPAddress apIP(192, 168, 1, 1);     // IP when in AP mode (when wifi connect fails)
@@ -147,8 +148,8 @@ void lampStatePublish(bool xlampstate){       // We are going to publish our sta
   }
 }
 
-void update_state() {
-  if(lastLampState != lampState || (millis() - lastUpdateTime > PUSHUPDATETIME)){
+void update_state(bool updateRequest) {
+  if(updateRequest || lastLampState != lampState || (millis() - lastUpdateTime > PUSHUPDATETIME)){
     static unsigned long mqtt_last_time = millis();
     static bool overflow_flag = false;
     if(mqtt_publish_overflow){                  // Stop publishing if we have hit service overflow
@@ -199,7 +200,7 @@ void loop(){
   MQTT_connect();
 
   // periodically push state to mqtt. either by state change, timeout, or millis() rollover
-  update_state();
+  update_state(false);
 
   // Read from our subscription queue until we run out, or
   // wait up to 5 seconds for subscription to update
@@ -221,6 +222,9 @@ void loop(){
         digitalWrite(LAMPPIN, LOW);
         Serial.println("Off executed");
         lampState = false;
+      }
+      else if (strstr(buffer, STATUSREQUEST) != NULL){
+        update_state(true);
       }
     }
     else if (subscription == &throttle){
