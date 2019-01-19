@@ -42,6 +42,7 @@ String ssidList;                          // Scanned SSIDs in AP mode
 bool lampState = false;                    // Is lamp currently on or off
 bool lastLampState = false;
 unsigned long lastUpdateTime = 0;
+bool mqtt_publish_overflow = false;
 
 DNSServer dnsServer;
 ESP8266WebServer webServer(80);
@@ -82,37 +83,7 @@ void MQTT_connect(){
   Serial.println("MQTT Connected!");
 }
 
-void lampStatePublish(bool xlampstate){       // We are going to publish our state back in case it is changed locally
-  Serial.print(F("\nSending lamp val "));
-  Serial.print(xlampstate);
-  Serial.print("...");
-  char* xlamp = LAMPOFF;
-  if(xlampstate) xlamp = LAMPON;
-  if (! bedroomPush.publish(xlamp)) {
-    Serial.println(F("Failed"));
-  } else {
-    Serial.println(F("OK!"));
-  }
-}
-
-void handleSwitchISR() {
-  static unsigned long last_interrupt_time = 0;
-  unsigned long interrupt_time = millis();
-  if(interrupt_time - last_interrupt_time > 200 || interrupt_time < last_interrupt_time){
-    lampState = !lampState;                     // update lamp state
-    digitalWrite(LAMPPIN, lampState);          // Invert state of lamp
-    last_interrupt_time = interrupt_time;
-  }
-}
-
-void setup(){
-  pinMode(LAMPPIN, OUTPUT);
-  pinMode(SWITCHPIN, INPUT);
-  Serial.begin(115200);
-  // switchState = digitalRead(SWITCHPIN);   // Get initial state of the lamp switch
-  attachInterrupt(SWITCHPIN, handleSwitchISR, CHANGE);
-  lampState = true;
-  handleSwitchISR();
+void wifi_setup(){
   //WiFiManager
   //Local intialization. Once its business is done, there is no need to keep it around
   WiFiManager wifiManager;
@@ -132,13 +103,15 @@ void setup(){
 
   //if you get here you have connected to the WiFi
   Serial.println("connected...yeey :)");
+}
 
+void ota_setup(){
   // OTA Port defaults to 8266
   // ArduinoOTA.setPort(8266);
   // Hostname defaults to esp8266-[ChipID]
   ArduinoOTA.setHostname("BedroomLamp");
   // No authentication by default
-  // ArduinoOTA.setPassword((const char *)"123");
+  // ArduinoOTA.setPassword((const char *)OTA_PASS);
 
   ArduinoOTA.onStart([]() {
     Serial.println("Start");
@@ -158,32 +131,75 @@ void setup(){
     else if (error == OTA_END_ERROR) Serial.println("End Failed");
   });
   ArduinoOTA.begin();
+}
+
+void lampStatePublish(bool xlampstate){       // We are going to publish our state back in case it is changed locally
+  Serial.print(F("\nSending lamp val "));
+  Serial.print(xlampstate);
+  Serial.print("...");
+  char* xlamp = LAMPOFF;
+  if(xlampstate) xlamp = LAMPON;
+  if (! bedroomPush.publish(xlamp)) {
+    Serial.println(F("Failed"));
+  } 
+  else {
+    Serial.println(F("OK!"));
+  }
+}
+
+void update_state() {
+  if(lastLampState != lampState || (millis() - lastUpdateTime > PUSHUPDATETIME)){
+    static unsigned long mqtt_last_time = millis();
+    static bool overflow_flag = false;
+    if(mqtt_publish_overflow){                  // Stop publishing if we have hit service overflow
+      mqtt_last_time = millis();
+      overflow_flag = true;
+      mqtt_publish_overflow = false;
+    }
+    else if (!overflow_flag || (millis() - mqtt_last_time > AIOTHROTTLETIMEOUT)){
+      lampStatePublish(lampState);                // Push state change back to MQTT server
+      lastLampState = lampState;
+      lastUpdateTime = millis();
+      overflow_flag = false;
+    }
+  }
+}
+
+void handleSwitchISR() {
+  static unsigned long last_interrupt_time = 0;
+  unsigned long interrupt_time = millis();
+  if(interrupt_time - last_interrupt_time > 200){
+    lampState = !lampState;                     // update lamp state
+    digitalWrite(LAMPPIN, lampState);          // Invert state of lamp
+    last_interrupt_time = interrupt_time;
+  }
+}
+
+void setup(){
+  pinMode(LAMPPIN, OUTPUT);
+  pinMode(SWITCHPIN, INPUT);
+  Serial.begin(115200);
+
+  attachInterrupt(SWITCHPIN, handleSwitchISR, CHANGE);
+  
+  wifi_setup();
+  ota_setup();
 
   mqtt.subscribe(&bedroom);         // Subscribe to the bedroom feed on adafruit io
+  mqtt.subscribe(&throttle);
   MQTT_connect();
+
   bedroomPub.publish(LAMPOFF);      // write an initial state to keep things intact until ability to get last message is available
   lampStatePublish(false);
 }
 
 void loop(){
-  static bool mqtt_publish_overflow = false;
   ArduinoOTA.handle();          // Check for OTA
   //Connect/Reconnect to MQTT
   MQTT_connect();
 
   // periodically push state to mqtt. either by state change, timeout, or millis() rollover
-  if(lastLampState != lampState || ((millis() >= PUSHUPDATETIME + lastUpdateTime) || millis() < lastUpdateTime)){
-    static unsigned long mqtt_last_time = millis();
-    if(mqtt_publish_overflow){                  // Stop publishing if we have hit service overflow
-      mqtt_last_time = millis();
-    }
-    else if (!mqtt_publish_overflow || (millis() - mqtt_last_time > AIOTHROTTLETIMEOUT)){
-      lampStatePublish(lampState);                // Push state change back to MQTT server
-      lastLampState = lampState;
-      lastUpdateTime = millis();
-    }
-    mqtt_publish_overflow = false;
-  }
+  update_state();
 
   // Read from our subscription queue until we run out, or
   // wait up to 5 seconds for subscription to update

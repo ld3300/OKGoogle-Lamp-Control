@@ -4,3 +4,5 @@
 #define MQTT_PORT     1883
 #define MQTT_NAME     "YOUR USERNAME"
 #define MQTT_PASS     "YOUR AIO KEY"
+
+#define OTA_PASS      "OTA PASSWORD"
